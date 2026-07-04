@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local model files (downloaded from ModelScope / HuggingFace)
+/models/
+/logs/
+/uploads/
+/front/dist/
+/front/node_modules/
+test.py
+.env
+prompt
+docs/todo

@@ -1,0 +1,32 @@
+[project]
+name = "smart-rag"
+version = "0.1.0"
+description = "Enterprise RAG Agent System based on LangChain + Milvus + FastAPI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-milvus>=0.2.0",
+    "langchain-huggingface>=0.1.0",
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "python-dotenv>=1.0.0",
+    "pypdf>=5.0.0",
+    "pydantic>=2.0.0",
+    "pymilvus>=2.4.0,<3.0",
+    "modelscope>=1.0.0",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+index-strategy = "unsafe-first-match"
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu126"
