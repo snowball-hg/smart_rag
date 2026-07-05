@@ -136,10 +136,15 @@ class RAGAgent:
                                 name_parts = rest.split("（")
                                 doc_name = name_parts[0].strip()
                                 chunk_info = name_parts[1].replace("）", "").strip() if len(name_parts) >= 2 else ""
-                                if doc_name and doc_name not in [s["doc_name"] for s in sources]:
+                                # 从 "第3块" 中提取数字 3
+                                try:
+                                    chunk_index = int(''.join(filter(str.isdigit, chunk_info)))
+                                except ValueError:
+                                    chunk_index = 0
+                                if doc_name and (doc_name, chunk_index) not in [(s["doc_name"], s["chunk_index"]) for s in sources]:
                                     sources.append({
                                         "doc_name": doc_name,
-                                        "chunk_index": chunk_info,
+                                        "chunk_index": chunk_index,
                                         "content": "",
                                     })
         return sources
