@@ -16,6 +16,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.config import settings
 from app.logger import logger
+from app.reranker import reranker
 from app.vector_store import vector_store_manager
 
 # Agent 系统 Prompt
@@ -60,9 +61,16 @@ def _create_retrieval_tool(top_k_override: Optional[int] = None) -> BaseTool:
             检索到的文档内容文本。
         """
         k = top_k_override or settings.TOP_K
-        docs = vector_store_manager.similarity_search(query, k=k)
+        candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else k
+        docs = vector_store_manager.similarity_search(query, k=candidate_k)
         if not docs:
             return "知识库中没有找到相关信息。"
+
+        if settings.RERANK_ENABLED and len(docs) > 1:
+            try:
+                docs = reranker.rerank(query, docs, top_k=k)
+            except Exception as e:
+                logger.warning("Agent 重排序失败，使用原始检索结果: %s", e)
 
         results = []
         for i, doc in enumerate(docs):
@@ -208,10 +216,10 @@ class RAGAgent:
                 "sources": [],
             }
 
-    def chat_stream(
+    async def chat_stream(
         self, question: str, session_id: str, top_k: Optional[int] = None
     ):
-        """流式对话，通过生成器逐 token 产出 SSE 事件。
+        """流式对话，通过异步生成器逐 token 产出 SSE 事件。
 
         Args:
             question: 用户输入。
@@ -242,16 +250,14 @@ class RAGAgent:
         )
 
         try:
-            events = agent.stream(
-                {"messages": [HumanMessage(content=question)]},
-                {"configurable": {"thread_id": session_id}},
-                stream_mode="messages",
-            )
-
             tool_contents: dict[str, str] = {}
             full_answer = ""
 
-            for msg_chunk, metadata in events:
+            async for msg_chunk, metadata in agent.astream(
+                {"messages": [HumanMessage(content=question)]},
+                {"configurable": {"thread_id": session_id}},
+                stream_mode="messages",
+            ):
                 # 记录日志方便调试
                 node = metadata.get("langgraph_node", "unknown") if isinstance(metadata, dict) else "unknown"
                 logger.debug(

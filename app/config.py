@@ -47,6 +47,12 @@ class Settings:
     # ---- Retrieval ----
     TOP_K: int = int(os.getenv("TOP_K", "5"))
 
+    # ---- Rerank ----
+    RERANK_ENABLED: bool = os.getenv("RERANK_ENABLED", "true").lower() == "true"
+    RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    RERANK_CANDIDATE_K: int = int(os.getenv("RERANK_CANDIDATE_K", "20"))
+    RERANK_MODEL_PATH: str = os.getenv("RERANK_MODEL_PATH", r"D:\project\AI\smart_rag\models")
+
     # ---- Logging ----
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "logs/rag_system.log")

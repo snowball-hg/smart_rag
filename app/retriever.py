@@ -12,10 +12,11 @@ from typing import Optional
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from app.config import settings
 from app.logger import logger
+from app.reranker import reranker
 from app.vector_store import vector_store_manager
 
 # RAG 专用 Prompt 模板
@@ -79,16 +80,18 @@ class RAGRetriever:
             llm: 语言模型实例（需兼容 LangChain 的 BaseLanguageModel）。
         """
         self._llm = llm
-        self._retriever = vector_store_manager.as_retriever()
         self._rag_chain = self._build_rag_chain()
 
     def _build_rag_chain(self):
-        """构建 RAG 链：检索 -> Prompt -> LLM -> 解析。
+        """构建 RAG 生成链：Prompt -> LLM -> 解析。
 
-        使用 LCEL（LangChain Expression Language）构建。
+        检索和重排序由 query() 统一完成，链只负责生成回答。
         """
+        def _format_with_question(inputs: dict) -> dict:
+            return {"context": format_docs(inputs["docs"]), "question": inputs["question"]}
+
         return (
-            {"context": self._retriever | format_docs, "question": RunnablePassthrough()}
+            RunnableLambda(_format_with_question)
             | RAG_PROMPT
             | self._llm
             | StrOutputParser()
@@ -104,17 +107,14 @@ class RAGRetriever:
         Returns:
             包含 answer 和 sources 的字典。
         """
-        if top_k is not None:
-            self._retriever.search_kwargs["k"] = top_k
+        final_k = top_k or settings.TOP_K
+        candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else final_k
 
-        # 先检索文档块用于来源展示
-        retrieved_docs = vector_store_manager.similarity_search(
-            question, k=top_k or settings.TOP_K
-        )
+        # 1. 检索（取更多候选）
+        retrieved_docs = vector_store_manager.similarity_search(question, k=candidate_k)
 
         if not retrieved_docs:
             logger.warning("未检索到相关文档: %s", question[:50])
-            # 即使没有检索结果也要让 LLM 回答
             answer = self._llm.invoke(
                 f"用户问：{question}\n\n注意：没有检索到相关文档内容，请告知用户目前知识库中没有相关信息。"
             )
@@ -123,15 +123,22 @@ class RAGRetriever:
                 "sources": [],
             }
 
-        # 执行 RAG 链
+        # 2. 重排序（只做一次）
+        if settings.RERANK_ENABLED and len(retrieved_docs) > 1:
+            try:
+                retrieved_docs = reranker.rerank(question, retrieved_docs, top_k=final_k)
+            except Exception as e:
+                logger.warning("重排序失败，使用原始检索结果: %s", e)
+
         logger.info(
             "RAG 查询: question='%s...', top_k=%d, retrieved=%d",
             question[:50],
-            top_k or settings.TOP_K,
+            final_k,
             len(retrieved_docs),
         )
 
-        answer = self._rag_chain.invoke(question)
+        # 3. 链只生成回答，传入已检索并重排好的文档
+        answer = self._rag_chain.invoke({"docs": retrieved_docs, "question": question})
         sources = format_sources(retrieved_docs)
 
         return {"answer": answer, "sources": sources}

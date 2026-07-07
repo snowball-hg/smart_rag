@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.concurrency import iterate_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_openai import ChatOpenAI
@@ -287,12 +286,10 @@ async def chat_stream(request: ChatRequest):
         )
 
     async def event_generator():
-        async for event in iterate_in_threadpool(
-            _rag_agent.chat_stream(
-                question=request.question,
-                session_id=request.session_id,
-                top_k=request.top_k,
-            )
+        async for event in _rag_agent.chat_stream(
+            question=request.question,
+            session_id=request.session_id,
+            top_k=request.top_k,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
