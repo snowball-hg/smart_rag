@@ -1,7 +1,7 @@
 """FastAPI 应用主文件。
 
 定义所有 RESTful API 端点，包括：
-- 文件上传与索引
+- 文件上传与索引（支持文档分类和预处理开关）
 - 纯问答（RAG，无会话）
 - 对话式交互（Agent，带记忆）
 - 文档删除管理
@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_openai import ChatOpenAI
@@ -50,10 +50,7 @@ _llm_configured: bool = False
 
 
 def _init_llm() -> Optional[ChatOpenAI]:
-    """初始化 DeepSeek LLM 实例。
-
-    如果 API Key 未配置，返回 None，后续端点会返回 503。
-    """
+    """初始化 DeepSeek LLM 实例。"""
     api_key = settings.DEEPSEEK_API_KEY
     if not api_key or api_key == "sk-your-deepseek-api-key-here":
         logger.warning("DEEPSEEK_API_KEY 未配置，LLM 功能不可用")
@@ -70,8 +67,7 @@ def _init_llm() -> Optional[ChatOpenAI]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理，替代已弃用的 on_event 装饰器。"""
-    # 启动时执行
+    """应用生命周期管理。"""
     global _llm, _rag_retriever, _rag_agent, _llm_configured
 
     logger.info("=" * 50)
@@ -79,10 +75,21 @@ async def lifespan(app: FastAPI):
     logger.info("LLM 模型: %s", settings.DEEPSEEK_MODEL_NAME)
     logger.info("Milvus 地址: %s:%s", settings.MILVUS_HOST, settings.MILVUS_PORT)
     logger.info("Embedding 提供商: %s", settings.EMBEDDING_PROVIDER)
+    logger.info(
+        "处理器配置: OCR=%s, 清洗=%s, 智能切分=%s",
+        settings.PROCESSOR_ENABLE_OCR,
+        settings.PROCESSOR_ENABLE_CLEANING,
+        settings.PROCESSOR_ENABLE_SMART_CHUNK,
+    )
     logger.info("分块配置: size=%d, overlap=%d", settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+    logger.info(
+        "检索配置: 模式=%s, BM25=%s, 重排序=%s",
+        settings.RETRIEVAL_MODE,
+        settings.BM25_ENABLED,
+        settings.RERANK_ENABLED,
+    )
     logger.info("=" * 50)
 
-    # 尝试初始化 LLM
     _llm = _init_llm()
     _llm_configured = _llm is not None
 
@@ -96,12 +103,10 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("LLM 未配置，请先设置 DEEPSEEK_API_KEY")
 
-    # 确保上传目录存在
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
     yield
 
-    # 关闭时执行（可选）
     logger.info("RAG Agent 服务关闭中...")
 
 # ==================== 应用初始化 ====================
@@ -109,11 +114,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RAG Agent 服务",
     description="基于 LangChain + Milvus + FastAPI 的企业级检索增强生成系统",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
-# CORS 配置，允许跨域调用
+# CORS 配置
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -128,10 +133,7 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """健康检查端点。
-
-    返回服务状态、LLM 配置状态、Milvus 连接状态和向量数量。
-    """
+    """健康检查端点。"""
     try:
         vector_count = vector_store_manager.get_collection_stats()
         milvus_ok = True
@@ -145,31 +147,60 @@ async def health_check():
         llm_configured=_llm_configured,
         milvus_connected=milvus_ok,
         vector_count=vector_count,
+        bm25_enabled=settings.BM25_ENABLED,
+        retrieval_mode=settings.RETRIEVAL_MODE,
         timestamp=__import__("datetime").datetime.now().isoformat(),
     )
 
 
+VALID_CATEGORIES = {"regulation", "safety", "manual", "report", "general"}
+
+
 @app.post("/upload", response_model=UploadResponse)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    category: Optional[str] = Form(None),
+    enable_ocr: Optional[bool] = Form(None),
+    enable_cleaning: Optional[bool] = Form(None),
+    enable_smart_chunk: Optional[bool] = Form(None),
+):
     """上传文件并索引到知识库。
 
-    支持的格式：PDF、TXT、Markdown（.md/.mdx）。
-    上传后自动执行：加载 -> 分块 -> 向量化 -> 存入 Milvus。
+    支持的格式：PDF、TXT、MD、Word、PPT、Excel、HTML、CSV 等。
+    通过 Form 参数控制预处理行为：
+    - category: 文档分类（regulation/safety/manual/report/general）
+    - enable_ocr: 是否启用 OCR 识别扫描件
+    - enable_cleaning: 是否启用文本清洗
+    - enable_smart_chunk: 是否启用智能切分
+
+    不传参数时使用配置文件中的默认值。
     """
     # ---- 验证文件类型 ----
-    allowed_extensions = {".pdf", ".txt", ".md", ".mdx"}
     ext = Path(file.filename).suffix.lower()
-    if ext not in allowed_extensions:
+    if ext not in settings.SUPPORTED_FILE_TYPES:
+        # 保持向后兼容
+        allowed_basic = {".pdf", ".txt", ".md", ".mdx"}
+        if ext not in allowed_basic:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"不支持的文件类型: {ext}。"
+                    f"基础支持: {', '.join(allowed_basic)}；"
+                    f"安装 Unstructured 后可支持: Word/PPT/Excel/HTML/CSV/Email 等"
+                ),
+            )
+
+    # ---- 验证分类 ----
+    if category and category not in VALID_CATEGORIES:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件类型: {ext}。支持: {', '.join(allowed_extensions)}",
+            detail=f"无效的分类: {category}。可选值: {', '.join(VALID_CATEGORIES)}",
         )
 
     # ---- 保存上传文件 ----
     upload_dir = Path(settings.UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    # 生成唯一文件名，防止冲突
     unique_name = f"{uuid.uuid4().hex}{ext}"
     file_path = upload_dir / unique_name
 
@@ -181,9 +212,15 @@ async def upload_file(file: UploadFile = File(...)):
         logger.error("文件保存失败: %s", e)
         raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
-    # ---- 处理文档（加载 -> 分块 -> 添加元数据） ----
+    # ---- 处理文档（使用高级管线或基础流程） ----
     try:
-        chunks = process_file(file_path)
+        chunks = process_file(
+            file_path,
+            category=category,
+            enable_ocr=enable_ocr,
+            enable_cleaning=enable_cleaning,
+            enable_smart_chunk=enable_smart_chunk,
+        )
         if not chunks:
             raise HTTPException(
                 status_code=400,
@@ -202,23 +239,32 @@ async def upload_file(file: UploadFile = File(...)):
         logger.error("向量存储失败: %s", e)
         raise HTTPException(status_code=500, detail=f"向量存储失败: {str(e)}")
 
-    # ---- 获取 doc_id ----
     doc_id = chunks[0].metadata["doc_id"]
+
+    # ---- 记录使用的处理器 ----
+    processors_used = []
+    if "heading_path" in chunks[0].metadata:
+        processors_used.append("smart_chunk")
+    if any(doc.metadata.get("element_type") == "ocr_text" for doc in chunks):
+        processors_used.append("ocr")
+    if category and "category" in chunks[0].metadata:
+        processors_used.append(f"category_{category}")
 
     return UploadResponse(
         doc_id=doc_id,
         doc_name=file.filename,
         chunk_count=len(chunks),
-        message=f"文档 '{file.filename}' 处理完成，共 {len(chunks)} 个文档块",
+        message=(
+            f"文档 '{file.filename}' 处理完成，共 {len(chunks)} 个文档块"
+            + (f"（分类: {category}）" if category else "")
+        ),
+        processors_used=processors_used,
     )
 
 
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """纯问答模式（RAG，不保留会话记忆）。
-
-    从知识库检索相关文档，结合 LLM 生成回答。
-    """
+    """纯问答模式（RAG，不保留会话记忆）。"""
     if not _llm_configured or _rag_retriever is None:
         raise HTTPException(
             status_code=503,
@@ -242,10 +288,7 @@ async def query_documents(request: QueryRequest):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest):
-    """对话式交互（Agent 模式，带多轮记忆）。
-
-    Agent 可自主决定是否调用检索工具，并记忆上下文。
-    """
+    """对话式交互（Agent 模式，带多轮记忆）。"""
     if not _llm_configured or _rag_agent is None:
         raise HTTPException(
             status_code=503,
@@ -272,13 +315,7 @@ async def chat_with_agent(request: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """流式对话（SSE），逐 token 返回 AI 生成内容。
-
-    使用 Server-Sent Events 协议，事件格式：
-    - data: {"type": "token", "content": "..."}   文本片段
-    - data: {"type": "done", "session_id": "...", "sources": [...]}  完成
-    - data: {"type": "error", "content": "..."}   错误
-    """
+    """流式对话（SSE），逐 token 返回 AI 生成内容。"""
     if not _llm_configured or _rag_agent is None:
         raise HTTPException(
             status_code=503,
@@ -306,10 +343,7 @@ async def chat_stream(request: ChatRequest):
 
 @app.delete("/documents/{doc_id}", response_model=DeleteResponse)
 async def delete_document(doc_id: str):
-    """删除指定文档的所有数据。
-
-    根据 doc_id 从 Milvus 中删除对应的所有文档块。
-    """
+    """删除指定文档的所有数据。"""
     try:
         deleted = vector_store_manager.delete_by_doc_id(doc_id)
         return DeleteResponse(
@@ -323,10 +357,7 @@ async def delete_document(doc_id: str):
 
 @app.delete("/documents", response_model=DeleteResponse)
 async def delete_all_documents():
-    """清空知识库中的所有数据。
-
-    谨慎操作！会删除 Milvus 集合中的所有文档块。
-    """
+    """清空知识库中的所有数据。"""
     try:
         vector_store_manager.delete_collection()
         return DeleteResponse(

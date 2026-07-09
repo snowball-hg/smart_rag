@@ -30,16 +30,35 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = Field(None, ge=1, le=50, description="检索返回的文档块数量")
 
 
+class UploadRequest(BaseModel):
+    """文件上传请求（扩展参数）。"""
+
+    category: Optional[str] = Field(
+        None,
+        description="文档分类，可选值: regulation/safety/manual/report/general",
+    )
+    enable_ocr: Optional[bool] = Field(
+        None, description="是否启用 OCR 识别扫描件"
+    )
+    enable_cleaning: Optional[bool] = Field(
+        None, description="是否启用文本清洗"
+    )
+    enable_smart_chunk: Optional[bool] = Field(
+        None, description="是否启用智能切分"
+    )
+
+
 # ==================== 响应模型 ====================
 
 
 class SourceDocument(BaseModel):
     """引用来源信息。"""
 
-
     doc_name: str = Field(..., description="文档名称")
     chunk_index: int = Field(..., description="块序号")
     content: str = Field(..., description="块内容摘要")
+    category: Optional[str] = Field(None, description="文档分类")
+    heading_path: Optional[str] = Field(None, description="标题路径")
 
 
 class QueryResponse(BaseModel):
@@ -68,6 +87,9 @@ class UploadResponse(BaseModel):
     doc_name: str = Field(..., description="文档名称")
     chunk_count: int = Field(..., description="分块数量")
     message: str = Field(..., description="处理结果信息")
+    processors_used: list[str] = Field(
+        default_factory=list, description="本次使用的处理器"
+    )
 
 
 class DeleteResponse(BaseModel):
@@ -84,4 +106,6 @@ class HealthResponse(BaseModel):
     llm_configured: bool = Field(..., description="LLM 是否已配置 API Key")
     milvus_connected: bool = Field(..., description="Milvus 是否连接成功")
     vector_count: int = Field(..., description="当前向量库中的文档块数量")
+    bm25_enabled: bool = Field(default=True, description="Milvus 内置 BM25 是否启用")
+    retrieval_mode: str = Field(default="hybrid", description="当前检索模式")
     timestamp: str = Field(..., description="当前时间戳")

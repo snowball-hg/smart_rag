@@ -1,7 +1,11 @@
 """文档加载与文本分块模块。
 
-支持 PDF、TXT、Markdown 等常见格式的文档解析，
-并使用 RecursiveCharacterTextSplitter 进行智能分块。
+支持 PDF、TXT、Markdown 等常见格式的文档解析。
+通过 DocumentProcessor 管线提供高级功能（OCR、版面分析、智能切分等）。
+
+两种使用方式：
+1. 直接使用 process_file() — 保持向后兼容，自动使用启用的处理器
+2. 通过 DocumentProcessor 使用 — 精细控制各环节
 """
 
 from __future__ import annotations
@@ -25,7 +29,8 @@ from langchain_community.document_loaders.base import BaseLoader
 from app.config import settings
 from app.logger import logger
 
-# 支持的文件类型及其对应的加载器
+
+# 支持的文件类型及其对应的加载器（兜底使用）
 LOADER_MAP: dict[str, type] = {
     ".pdf": PyPDFLoader,
     ".txt": TextLoader,
@@ -35,14 +40,7 @@ LOADER_MAP: dict[str, type] = {
 
 
 def get_loader(file_path: str | Path) -> Optional[BaseLoader]:
-    """根据文件扩展名返回对应的文档加载器。
-
-    Args:
-        file_path: 文件路径。
-
-    Returns:
-        文档加载器实例，如果文件类型不支持则返回 None。
-    """
+    """根据文件扩展名返回对应的文档加载器（兜底用）。"""
     ext = Path(file_path).suffix.lower()
     loader_cls = LOADER_MAP.get(ext)
 
@@ -60,14 +58,7 @@ def get_loader(file_path: str | Path) -> Optional[BaseLoader]:
 
 
 def load_document(file_path: str | Path) -> list[Document]:
-    """加载单个文档并返回 Document 列表。
-
-    Args:
-        file_path: 文件路径。
-
-    Returns:
-        文档对象列表。如果加载失败则返回空列表。
-    """
+    """加载单个文档并返回 Document 列表（兜底用）。"""
     file_path = Path(file_path)
     if not file_path.exists():
         logger.error("文件不存在: %s", file_path)
@@ -87,14 +78,7 @@ def load_document(file_path: str | Path) -> list[Document]:
 
 
 def split_documents(docs: list[Document]) -> list[Document]:
-    """使用 RecursiveCharacterTextSplitter 对文档进行分块。
-
-    Args:
-        docs: 原始文档列表。
-
-    Returns:
-        分块后的文档列表。
-    """
+    """使用 RecursiveCharacterTextSplitter 对文档进行分块（兜底用）。"""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.CHUNK_SIZE,
         chunk_overlap=settings.CHUNK_OVERLAP,
@@ -112,29 +96,61 @@ def split_documents(docs: list[Document]) -> list[Document]:
     return chunks
 
 
-def process_file(file_path: str | Path) -> list[Document]:
-    """完整的文档处理流程：加载 -> 分块 -> 添加元数据。
+def process_file(
+    file_path: str | Path,
+    category: Optional[str] = None,
+    enable_ocr: Optional[bool] = None,
+    enable_cleaning: Optional[bool] = None,
+    enable_smart_chunk: Optional[bool] = None,
+) -> list[Document]:
+    """完整的文档处理入口（兼容原接口，自动使用高级管线）。
 
-    整个流程：
-    1. 根据文件扩展名选择合适的加载器
-    2. 加载文档内容
-    3. 将文档切分成小块
-    4. 为每个块添加统一的元数据（doc_id, doc_name, chunk_index, upload_time 等）
+    流程：
+    1. 尝试使用 DocumentProcessor 管线（启用高级功能）
+    2. 如果依赖缺失，自动降级到基础流程
+    3. 为每个块添加统一元数据
 
     Args:
         file_path: 上传文件路径。
+        category: 文档分类（regulation/safety/manual/report/general）。
+        enable_ocr: 是否启用 OCR 识别扫描件。
+        enable_cleaning: 是否启用文本清洗。
+        enable_smart_chunk: 是否启用智能切分。
 
     Returns:
         处理后的文档块列表，带有完整元数据。
     """
     file_path = Path(file_path)
+
+    # ----- 尝试使用高级管线 -----
+    try:
+        from app.processors.pipeline import document_processor
+
+        docs = document_processor.process(
+            file_path=file_path,
+            category=category,
+            enable_ocr=enable_ocr if enable_ocr is not None else settings.PROCESSOR_ENABLE_OCR,
+            enable_cleaning=enable_cleaning if enable_cleaning is not None else settings.PROCESSOR_ENABLE_CLEANING,
+            enable_smart_chunk=enable_smart_chunk if enable_smart_chunk is not None else settings.PROCESSOR_ENABLE_SMART_CHUNK,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+        )
+        if docs:
+            return docs
+
+    except ImportError as e:
+        logger.info("高级处理器依赖缺失 (%s)，降级到基础流程", e)
+    except Exception as e:
+        logger.warning("高级管线处理失败 (%s)，降级到基础流程", e)
+
+    # ----- 降级：使用原始基础流程 -----
+    logger.info("使用基础流程处理: %s", file_path.name)
     raw_docs = load_document(file_path)
     if not raw_docs:
         return []
 
     chunks = split_documents(raw_docs)
 
-    # 生成文档唯一标识（基于文件内容哈希）
     doc_id = _generate_doc_id(file_path)
     upload_time = datetime.now(timezone.utc).isoformat()
 
@@ -148,13 +164,14 @@ def process_file(file_path: str | Path) -> list[Document]:
                 "chunk_id": f"{doc_id}_{idx}",
             }
         )
-
-        # 确保 metadata 中包含 Milvus schema 必需的字段
         chunk.metadata.setdefault("author", "")
         chunk.metadata.setdefault("source", str(file_path))
+        if category:
+            chunk.metadata["category"] = category
 
     logger.info(
-        "文档处理完成: %s (doc_id=%s, chunks=%d)", file_path.name, doc_id, len(chunks)
+        "基础流程完成: %s (doc_id=%s, chunks=%d)",
+        file_path.name, doc_id, len(chunks),
     )
     return chunks
 

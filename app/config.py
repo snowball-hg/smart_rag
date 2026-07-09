@@ -36,22 +36,35 @@ class Settings:
     LOCAL_EMBEDDING_MODEL: str = os.getenv(
         "LOCAL_EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5"
     )
-    LOCAL_EMBEDDING_MODEL_PATH: str = os.getenv("LOCAL_EMBEDDING_MODEL_PATH", r"D:\project\AI\smart_rag\models")
+    LOCAL_EMBEDDING_MODEL_PATH: str = os.getenv(
+        "LOCAL_EMBEDDING_MODEL_PATH", r"D:\project\AI\smart_rag\models"
+    )
     QWEN_EMBEDDING_API_KEY: str = os.getenv("QWEN_EMBEDDING_API_KEY", "")
     QWEN_EMBEDDING_MODEL: str = os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v3")
 
     # ---- Document Processing ----
-    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
-    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "100"))
+
+    # ---- 处理器管线开关 ----
+    PROCESSOR_ENABLE_OCR: bool = os.getenv("PROCESSOR_ENABLE_OCR", "true").lower() == "true"
+    PROCESSOR_ENABLE_CLEANING: bool = os.getenv("PROCESSOR_ENABLE_CLEANING", "true").lower() == "true"
+    PROCESSOR_ENABLE_SMART_CHUNK: bool = os.getenv("PROCESSOR_ENABLE_SMART_CHUNK", "true").lower() == "true"
 
     # ---- Retrieval ----
     TOP_K: int = int(os.getenv("TOP_K", "5"))
+
+    # ---- BM25 关键词检索 ----
+    BM25_ENABLED: bool = os.getenv("BM25_ENABLED", "true").lower() == "true"
+    RETRIEVAL_MODE: str = os.getenv("RETRIEVAL_MODE", "hybrid")  # vector, bm25, hybrid
 
     # ---- Rerank ----
     RERANK_ENABLED: bool = os.getenv("RERANK_ENABLED", "true").lower() == "true"
     RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
     RERANK_CANDIDATE_K: int = int(os.getenv("RERANK_CANDIDATE_K", "20"))
-    RERANK_MODEL_PATH: str = os.getenv("RERANK_MODEL_PATH", r"D:\project\AI\smart_rag\models")
+    RERANK_MODEL_PATH: str = os.getenv(
+        "RERANK_MODEL_PATH", r"D:\project\AI\smart_rag\models"
+    )
 
     # ---- Logging ----
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -60,6 +73,16 @@ class Settings:
 
     # ---- Upload ----
     UPLOAD_DIR: str = "uploads"
+
+    # ---- 支持的文档类型 ----
+    SUPPORTED_FILE_TYPES: list[str] = [
+        ".pdf", ".txt", ".md", ".mdx",
+        ".doc", ".docx", ".ppt", ".pptx",
+        ".xls", ".xlsx",
+        ".html", ".htm",
+        ".csv", ".json", ".xml",
+        ".eml", ".msg",
+    ]
 
 
 settings = Settings()

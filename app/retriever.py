@@ -97,8 +97,57 @@ class RAGRetriever:
             | StrOutputParser()
         )
 
+    def _hybrid_search(self, query: str, top_k: int) -> list[Document]:
+        """混合检索：向量检索 + Milvus 内置 BM25 全文检索，使用 RRF 融合。
+
+        委托给 vector_store_manager.hybrid_search() 完成。
+        """
+        return vector_store_manager.hybrid_search(query, top_k=top_k)
+
+    def _expand_context(self, docs: list[Document], window: int = 1) -> list[Document]:
+        """为检索到的文档块扩展相邻上下文。
+
+        如果某块来自一个较大的文档，将其前后的邻居块也纳入上下文，
+        避免因分块切碎导致信息不完整。
+
+        Args:
+            docs: 检索到的文档块列表。
+            window: 前后扩展的块数。
+
+        Returns:
+            扩展后的文档块列表（已去重，保持原始排序优先）。
+        """
+        seen_ids = set()
+        expanded = []
+
+        for doc in docs:
+            doc_id = doc.metadata.get("doc_id")
+            chunk_idx = doc.metadata.get("chunk_index")
+
+            if doc_id is not None and chunk_idx is not None:
+                neighbors = vector_store_manager.get_adjacent_chunks(
+                    doc_id, chunk_idx, window=window
+                )
+                for nd in neighbors:
+                    cid = nd.metadata.get("chunk_id")
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        expanded.append(nd)
+
+            cid = doc.metadata.get("chunk_id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                expanded.append(doc)
+
+        return expanded
+
     def query(self, question: str, top_k: Optional[int] = None) -> dict:
-        """执行一次 RAG 查询。
+        """执行一次 RAG 查询（支持混合检索 + 上下文扩展）。
+
+        检索模式由 settings.RETRIEVAL_MODE 控制：
+        - "vector": 仅向量检索（原行为）
+        - "bm25":   仅 Milvus 内置 BM25 关键词检索
+        - "hybrid": 向量 + BM25 混合检索
 
         Args:
             question: 用户问题。
@@ -108,10 +157,16 @@ class RAGRetriever:
             包含 answer 和 sources 的字典。
         """
         final_k = top_k or settings.TOP_K
-        candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else final_k
 
-        # 1. 检索（取更多候选）
-        retrieved_docs = vector_store_manager.similarity_search(question, k=candidate_k)
+        # 1. 根据模式选择检索方式
+        mode = settings.RETRIEVAL_MODE
+        if mode == "bm25":
+            retrieved_docs = vector_store_manager.bm25_search(question, k=final_k)
+        elif mode == "hybrid" and settings.BM25_ENABLED:
+            retrieved_docs = self._hybrid_search(question, top_k=final_k)
+        else:
+            candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else final_k
+            retrieved_docs = vector_store_manager.similarity_search(question, k=candidate_k)
 
         if not retrieved_docs:
             logger.warning("未检索到相关文档: %s", question[:50])
@@ -123,21 +178,25 @@ class RAGRetriever:
                 "sources": [],
             }
 
-        # 2. 重排序（只做一次）
-        if settings.RERANK_ENABLED and len(retrieved_docs) > 1:
+        # 2. 重排序（仅对 vector 和 hybrid 模式生效）
+        if mode != "bm25" and settings.RERANK_ENABLED and len(retrieved_docs) > 1:
             try:
                 retrieved_docs = reranker.rerank(question, retrieved_docs, top_k=final_k)
             except Exception as e:
                 logger.warning("重排序失败，使用原始检索结果: %s", e)
 
+        # 3. 上下文扩展：为每个命中的块带上前后邻居
+        retrieved_docs = self._expand_context(retrieved_docs, window=1)
+
         logger.info(
-            "RAG 查询: question='%s...', top_k=%d, retrieved=%d",
+            "RAG 查询: mode=%s, question='%s...', top_k=%d, expanded=%d",
+            mode,
             question[:50],
             final_k,
             len(retrieved_docs),
         )
 
-        # 3. 链只生成回答，传入已检索并重排好的文档
+        # 4. 链生成回答
         answer = self._rag_chain.invoke({"docs": retrieved_docs, "question": question})
         sources = format_sources(retrieved_docs)
 

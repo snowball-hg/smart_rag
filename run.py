@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+import os
 
 import uvicorn
 
@@ -16,6 +17,8 @@ if __name__ == "__main__":
     # debugpy 的 runpy.run_path() 会在同进程内 exec 目标脚本，
     # 此时 debugpy 模块已在 sys.modules 中，以此判断是否在调试模式
     is_debugging = "debugpy" in sys.modules
+    os.environ.setdefault("HTTP_PROXY", "http://127.0.0.1:7890")
+    os.environ.setdefault("HTTPS_PROXY", "http://127.0.0.1:7890")
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",

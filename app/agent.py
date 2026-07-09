@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool, tool
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
@@ -28,19 +30,60 @@ AGENT_SYSTEM_PROMPT = (
     "3. 记住对话历史，进行多轮交流\n\n"
     "使用规则：\n"
     "- 当用户提问时，如果问题需要查阅文档，请调用检索工具。\n"
+    "- 如果问题需要查阅文档，调用一次检索工具即可，不要多次检索。\n"
     "- 如果用户只是日常对话（打招呼、闲聊等），可以直接回复。\n"
     "- 检索后请引用信息来源（文档名称和块编号）。\n"
     "- 如果检索结果不充分，请告知用户并询问更多细节。\n"
-    "- 始终保持专业、友好、清晰的回答风格。"
+    "- 始终保持专业、友好、清晰的回答风格。\n"
+    "- 注意：检索工具会自动优化你的搜索关键词，你只需提供原始问题即可。"
+)
+
+# 查询重写 Prompt
+QUERY_REWRITE_PROMPT = (
+    "你是一个查询优化助手。你的任务是将用户的自然语言问题改写为"
+    "更利于知识库检索的搜索关键词。\n\n"
+    "规则：\n"
+    "1. 提取关键实体和概念，去除语气词、冗余修饰\n"
+    "2. 如果问题包含代词（它、这、那个等），结合上下文明确指代\n"
+    "3. 保持核心语义不变，输出简洁的搜索关键词\n"
+    "4. 直接输出重写后的查询，不要解释\n\n"
+    "用户问题：{question}\n\n"
+    "重写后的查询："
 )
 
 
-def _create_retrieval_tool(top_k_override: Optional[int] = None) -> BaseTool:
-    """创建知识库检索工具。
-
-    该工具供 Agent 在需要时调用，从 Milvus 中检索相关文档块。
+def _query_rewrite(question: str, llm) -> str:
+    """使用 LLM 将用户原始问题重写为更利于检索的关键词/短语。
 
     Args:
+        question: 用户原始问题。
+        llm: 语言模型实例。
+
+    Returns:
+        重写后的搜索查询。
+    """
+    try:
+        prompt = ChatPromptTemplate.from_messages([
+            ("human", QUERY_REWRITE_PROMPT),
+        ])
+        chain = prompt | llm | StrOutputParser()
+        rewritten = chain.invoke({"question": question}).strip()
+        if rewritten:
+            logger.info("查询重写: '%s...' → '%s'", question[:30], rewritten[:60])
+            return rewritten
+    except Exception as e:
+        logger.warning("查询重写失败，使用原始查询: %s", e)
+    return question
+
+
+def _create_retrieval_tool(llm, top_k_override: Optional[int] = None) -> BaseTool:
+    """创建知识库检索工具（含查询重写）。
+
+    该工具供 Agent 在需要时调用，先重写用户查询，
+    再从 Milvus 检索相关文档块。
+
+    Args:
+        llm: 语言模型实例，用于查询重写。
         top_k_override: 覆盖默认的 Top-K 值。
 
     Returns:
@@ -60,15 +103,36 @@ def _create_retrieval_tool(top_k_override: Optional[int] = None) -> BaseTool:
         Returns:
             检索到的文档内容文本。
         """
+        # 1. 查询重写
+        rewritten_query = _query_rewrite(query, llm)
+
         k = top_k_override or settings.TOP_K
-        candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else k
-        docs = vector_store_manager.similarity_search(query, k=candidate_k)
+        mode = settings.RETRIEVAL_MODE
+
+        # 2. 用重写后的查询检索
+        if mode == "bm25":
+            docs = vector_store_manager.bm25_search(rewritten_query, k=k)
+        elif mode == "hybrid" and settings.BM25_ENABLED:
+            docs = vector_store_manager.hybrid_search(rewritten_query, top_k=k)
+        else:
+            candidate_k = settings.RERANK_CANDIDATE_K if settings.RERANK_ENABLED else k
+            docs = vector_store_manager.similarity_search(rewritten_query, k=candidate_k)
+
+        if not docs:
+            logger.info("重写查询无结果，尝试原始查询: '%s'", query[:60])
+            if mode == "bm25":
+                docs = vector_store_manager.bm25_search(query, k=k)
+            elif mode == "hybrid" and settings.BM25_ENABLED:
+                docs = vector_store_manager.hybrid_search(query, top_k=k)
+            else:
+                docs = vector_store_manager.similarity_search(query, k=k)
+
         if not docs:
             return "知识库中没有找到相关信息。"
 
-        if settings.RERANK_ENABLED and len(docs) > 1:
+        if mode != "bm25" and settings.RERANK_ENABLED and len(docs) > 1:
             try:
-                docs = reranker.rerank(query, docs, top_k=k)
+                docs = reranker.rerank(rewritten_query, docs, top_k=k)
             except Exception as e:
                 logger.warning("Agent 重排序失败，使用原始检索结果: %s", e)
 
@@ -98,8 +162,8 @@ class RAGAgent:
             llm: 语言模型实例（需支持 Tool Calling）。
         """
         self._llm = llm
-        # 默认工具实例
-        self._default_tool = _create_retrieval_tool()
+        # 默认工具实例（传入 LLM 用于查询重写）
+        self._default_tool = _create_retrieval_tool(llm)
         self._agent = self._build_agent([self._default_tool])
         # 不同 top_k 对应的 Agent 缓存
         self._agent_cache: dict[int, CompiledStateGraph] = {}
@@ -174,7 +238,7 @@ class RAGAgent:
         # 从缓存获取或构建指定 top_k 的 Agent
         if top_k is not None:
             if top_k not in self._agent_cache:
-                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(top_k)])
+                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(self._llm, top_k)])
             agent = self._agent_cache[top_k]
         else:
             agent = self._agent
@@ -237,7 +301,7 @@ class RAGAgent:
         # 从缓存获取或构建指定 top_k 的 Agent
         if top_k is not None:
             if top_k not in self._agent_cache:
-                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(top_k)])
+                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(self._llm, top_k)])
             agent = self._agent_cache[top_k]
         else:
             agent = self._agent
