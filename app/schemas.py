@@ -109,3 +109,44 @@ class HealthResponse(BaseModel):
     bm25_enabled: bool = Field(default=True, description="Milvus 内置 BM25 是否启用")
     retrieval_mode: str = Field(default="hybrid", description="当前检索模式")
     timestamp: str = Field(..., description="当前时间戳")
+
+
+# ==================== 对话历史模型 ====================
+
+
+class SessionInfo(BaseModel):
+    """会话信息。"""
+
+    id: str = Field(..., description="会话 ID")
+    title: str = Field(..., description="会话标题")
+    created_at: str = Field(..., description="创建时间")
+    updated_at: str = Field(..., description="最后更新时间")
+
+
+class SessionListResponse(BaseModel):
+    """会话列表响应。"""
+
+    sessions: list[SessionInfo] = Field(..., description="会话列表")
+
+
+class RenameSessionRequest(BaseModel):
+    """重命名会话请求。"""
+
+    title: str = Field(..., min_length=1, max_length=100, description="新会话标题")
+
+
+class MessageInfo(BaseModel):
+    """消息信息。"""
+
+    id: int = Field(..., description="消息 ID")
+    session_id: str = Field(..., description="会话 ID")
+    role: str = Field(..., description="角色 (user/assistant)")
+    content: str = Field(..., description="消息内容")
+    sources: list = Field(default_factory=list, description="来源信息")
+    created_at: str = Field(..., description="创建时间")
+
+
+class MessageListResponse(BaseModel):
+    """消息列表响应。"""
+
+    messages: list[MessageInfo] = Field(..., description="消息列表")

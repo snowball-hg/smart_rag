@@ -19,3 +19,6 @@ test.py
 .env
 prompt
 docs/todo
+data/chat_history.db
+data/chat_history.db-shm
+data/chat_history.db-wal

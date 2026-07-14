@@ -24,6 +24,15 @@ from fastapi.responses import StreamingResponse
 from langchain_openai import ChatOpenAI
 
 from app.agent import RAGAgent
+from app.chat_history import (
+    add_message,
+    create_session,
+    delete_session,
+    get_messages,
+    get_session,
+    list_sessions,
+    rename_session,
+)
 from app.config import settings
 from app.loader import process_file
 from app.logger import logger
@@ -33,8 +42,13 @@ from app.schemas import (
     ChatResponse,
     DeleteResponse,
     HealthResponse,
+    MessageInfo,
+    MessageListResponse,
     QueryRequest,
     QueryResponse,
+    RenameSessionRequest,
+    SessionInfo,
+    SessionListResponse,
     SourceDocument,
     UploadResponse,
 )
@@ -296,11 +310,31 @@ async def chat_with_agent(request: ChatRequest):
         )
 
     try:
+        # 确保会话存在
+        create_session(request.session_id)
+
+        # 加载历史消息（当前消息还没保存，这是之前的所有对话）
+        history = get_messages(request.session_id)
+
+        # 保存用户消息
+        add_message(request.session_id, "user", request.question)
+
+        # 将历史消息传给 Agent，让它拥有完整的对话上下文
         result = _rag_agent.chat(
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
+            history_messages=history,
         )
+
+        # 保存 AI 回复
+        add_message(
+            request.session_id,
+            "assistant",
+            result["answer"],
+            sources=result["sources"],
+        )
+
         return ChatResponse(
             answer=result["answer"],
             session_id=result["session_id"],
@@ -322,12 +356,36 @@ async def chat_stream(request: ChatRequest):
             detail="LLM 未配置，请先设置 DEEPSEEK_API_KEY",
         )
 
+    # 确保会话存在
+    create_session(request.session_id)
+
+    # 加载历史消息（当前消息还没保存，这是之前的所有对话）
+    history = get_messages(request.session_id)
+
+    # 保存用户消息
+    add_message(request.session_id, "user", request.question)
+
     async def event_generator():
+        full_answer = ""
+
         async for event in _rag_agent.chat_stream(
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
+            history_messages=history,
         ):
+            # 累计完整回复
+            if event.get("type") == "token":
+                full_answer += event["content"]
+            elif event.get("type") == "done":
+                # 保存 AI 回复到数据库
+                add_message(
+                    request.session_id,
+                    "assistant",
+                    full_answer,
+                    sources=event.get("sources", []),
+                )
+
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
@@ -367,3 +425,67 @@ async def delete_all_documents():
     except Exception as e:
         logger.error("清空数据失败: %s", e)
         raise HTTPException(status_code=500, detail=f"清空数据失败: {str(e)}")
+
+
+# ==================== 会话管理 API ====================
+
+
+@app.get("/sessions", response_model=SessionListResponse)
+async def get_sessions():
+    """获取所有会话列表（按更新时间倒序）。"""
+    try:
+        sessions = list_sessions()
+        return SessionListResponse(
+            sessions=[SessionInfo(**s) for s in sessions]
+        )
+    except Exception as e:
+        logger.error("获取会话列表失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"获取会话列表失败: {str(e)}")
+
+
+@app.get("/sessions/{session_id}/messages", response_model=MessageListResponse)
+async def get_session_messages(session_id: str):
+    """获取指定会话的所有消息。"""
+    try:
+        session = get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        messages = get_messages(session_id)
+        return MessageListResponse(
+            messages=[MessageInfo(**m) for m in messages]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("获取消息失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"获取消息失败: {str(e)}")
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session_endpoint(session_id: str, request: RenameSessionRequest):
+    """重命名会话。"""
+    try:
+        success = rename_session(session_id, request.title)
+        if not success:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return {"message": "重命名成功", "session_id": session_id, "title": request.title}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("重命名会话失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"重命名会话失败: {str(e)}")
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    """删除会话及其所有消息。"""
+    try:
+        success = delete_session(session_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return {"message": "会话已删除", "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("删除会话失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"删除会话失败: {str(e)}")

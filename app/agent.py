@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
@@ -47,6 +48,7 @@ QUERY_REWRITE_PROMPT = (
     "2. 如果问题包含代词（它、这、那个等），结合上下文明确指代\n"
     "3. 保持核心语义不变，输出简洁的搜索关键词\n"
     "4. 直接输出重写后的查询，不要解释\n\n"
+    "5. 进行知识库查询时，把用户的原始问题原封不动地传给知识库查询工具，不要修改\n"
     "用户问题：{question}\n\n"
     "重写后的查询："
 )
@@ -221,15 +223,45 @@ class RAGAgent:
                                     })
         return sources
 
+    @staticmethod
+    def _build_message_list(
+        question: str,
+        history_messages: Optional[list[dict]] = None,
+    ) -> list:
+        """构建传递给 Agent 的完整消息列表，包含历史对话 + 当前问题。
+
+        Args:
+            question: 当前用户问题。
+            history_messages: 历史消息列表（来自 SQLite 的 dict）。
+
+        Returns:
+            LangChain BaseMessage 列表。
+        """
+        messages: list = []
+        if history_messages:
+            for msg in history_messages:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    messages.append(AIMessage(content=msg["content"]))
+        # 当前问题
+        messages.append(HumanMessage(content=question))
+        return messages
+
     def chat(
-        self, question: str, session_id: str, top_k: Optional[int] = None
+        self,
+        question: str,
+        session_id: str,
+        top_k: Optional[int] = None,
+        history_messages: Optional[list[dict]] = None,
     ) -> dict:
         """执行一次带记忆的对话。
 
         Args:
             question: 用户输入。
-            session_id: 会话标识。
+            session_id: 会话标识（仅用于日志）。
             top_k: 检索文档块数量（可选）。
+            history_messages: 历史消息列表（来自 SQLite），用于恢复上下文。
 
         Returns:
             包含 answer 和 sources 的字典。
@@ -245,13 +277,22 @@ class RAGAgent:
 
         try:
             logger.info(
-                "Agent 对话: session=%s, question='%s...'",
+                "Agent 对话: session=%s, question='%s...' (history=%d条)",
                 session_id,
                 question[:50],
+                len(history_messages) if history_messages else 0,
             )
 
+            # 构建完整消息列表（历史 + 当前）
+            input_messages = self._build_message_list(question, history_messages)
+            # 每个请求用唯一 thread_id，避免 InMemorySaver 混淆状态
+            request_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
+
             # 执行 Agent
-            result = agent.invoke({"messages": [HumanMessage(content=question)]},{"configurable": {"thread_id": session_id}})
+            result = agent.invoke(
+                {"messages": input_messages},
+                {"configurable": {"thread_id": request_id}},
+            )
 
             # 提取回答
             result_messages = result.get("messages", [])
@@ -263,8 +304,6 @@ class RAGAgent:
 
             # 解析来源
             sources = self._parse_sources_from_tool_calls(result_messages)
-
-
 
             return {
                 "answer": answer,
@@ -281,7 +320,11 @@ class RAGAgent:
             }
 
     async def chat_stream(
-        self, question: str, session_id: str, top_k: Optional[int] = None
+        self,
+        question: str,
+        session_id: str,
+        top_k: Optional[int] = None,
+        history_messages: Optional[list[dict]] = None,
     ):
         """流式对话，通过异步生成器逐 token 产出 SSE 事件。
 
@@ -289,6 +332,7 @@ class RAGAgent:
             question: 用户输入。
             session_id: 会话标识。
             top_k: 检索文档块数量（可选）。
+            history_messages: 历史消息列表（来自 SQLite），用于恢复上下文。
 
         Yields:
             dict: 包含 type 和对应数据的字典。
@@ -308,18 +352,24 @@ class RAGAgent:
 
 
         logger.info(
-            "Agent 流式对话: session=%s, question='%s...'",
+            "Agent 流式对话: session=%s, question='%s...' (history=%d条)",
             session_id,
             question[:50],
+            len(history_messages) if history_messages else 0,
         )
 
         try:
+            # 构建完整消息列表（历史 + 当前）
+            input_messages = self._build_message_list(question, history_messages)
+            # 每个请求用唯一 thread_id，避免 InMemorySaver 混淆状态
+            request_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
+
             tool_contents: dict[str, str] = {}
             full_answer = ""
 
             async for msg_chunk, metadata in agent.astream(
-                {"messages": [HumanMessage(content=question)]},
-                {"configurable": {"thread_id": session_id}},
+                {"messages": input_messages},
+                {"configurable": {"thread_id": request_id}},
                 stream_mode="messages",
             ):
                 # 记录日志方便调试

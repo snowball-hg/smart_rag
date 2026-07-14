@@ -49,3 +49,25 @@ export function deleteDocument(doc_id) {
 export function deleteAllDocuments() {
   return api.delete('/documents')
 }
+
+// ==================== 对话历史 API ====================
+
+/** 获取会话列表 */
+export function getSessions() {
+  return api.get('/sessions')
+}
+
+/** 获取会话的消息列表 */
+export function getSessionMessages(session_id) {
+  return api.get(`/sessions/${session_id}/messages`)
+}
+
+/** 重命名会话 */
+export function renameSession(session_id, title) {
+  return api.patch(`/sessions/${session_id}`, { title })
+}
+
+/** 删除会话 */
+export function deleteSession(session_id) {
+  return api.delete(`/sessions/${session_id}`)
+}
