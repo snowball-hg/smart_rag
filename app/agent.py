@@ -1,20 +1,20 @@
 """Agent 创建与执行模块。
 
 基于 LangGraph 构建具有工具调用能力的 ReAct Agent，
-通过消息列表维护多轮对话历史，支持自主检索决策。
+使用 SqliteSaver 持久化完整对话状态（含工具调用），支持断点续跑。
 """
 
 from __future__ import annotations
 
-import uuid
-from typing import Any, Optional
+from typing import Optional
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.output_parsers import StrOutputParser
+from app.common_tools import get_current_time
+
+
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool, tool
 from langchain.agents import create_agent
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from app.config import settings
@@ -157,16 +157,19 @@ class RAGAgent:
     通过消息列表维护每个会话的多轮对话历史。
     """
 
-    def __init__(self, llm):
+    def __init__(self, llm, checkpointer):
         """初始化 Agent。
 
         Args:
             llm: 语言模型实例（需支持 Tool Calling）。
+            checkpointer: LangGraph BaseCheckpointSaver 实例（如 AsyncSqliteSaver）。
         """
         self._llm = llm
+        self._checkpointer = checkpointer
         # 默认工具实例（传入 LLM 用于查询重写）
         self._default_tool = _create_retrieval_tool(llm)
-        self._agent = self._build_agent([self._default_tool])
+
+        self._agent = self._build_agent([self._default_tool, get_current_time])
         # 不同 top_k 对应的 Agent 缓存
         self._agent_cache: dict[int, CompiledStateGraph] = {}
 
@@ -183,7 +186,7 @@ class RAGAgent:
             model=self._llm,
             tools=tools,
             system_prompt=AGENT_SYSTEM_PROMPT,
-            checkpointer=InMemorySaver(),
+            checkpointer=self._checkpointer,
         )
 
 
@@ -223,45 +226,21 @@ class RAGAgent:
                                     })
         return sources
 
-    @staticmethod
-    def _build_message_list(
-        question: str,
-        history_messages: Optional[list[dict]] = None,
-    ) -> list:
-        """构建传递给 Agent 的完整消息列表，包含历史对话 + 当前问题。
-
-        Args:
-            question: 当前用户问题。
-            history_messages: 历史消息列表（来自 SQLite 的 dict）。
-
-        Returns:
-            LangChain BaseMessage 列表。
-        """
-        messages: list = []
-        if history_messages:
-            for msg in history_messages:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    messages.append(AIMessage(content=msg["content"]))
-        # 当前问题
-        messages.append(HumanMessage(content=question))
-        return messages
-
-    def chat(
+    async def chat(
         self,
         question: str,
         session_id: str,
         top_k: Optional[int] = None,
-        history_messages: Optional[list[dict]] = None,
     ) -> dict:
-        """执行一次带记忆的对话。
+        """执行一次带持久化记忆的对话（异步）。
+
+        AsyncSqliteSaver 会自动按 thread_id（即 session_id）保存和恢复
+        Agent 运行状态（含工具调用），实现断点续跑。
 
         Args:
             question: 用户输入。
-            session_id: 会话标识（仅用于日志）。
+            session_id: 会话标识（作为 thread_id）。
             top_k: 检索文档块数量（可选）。
-            history_messages: 历史消息列表（来自 SQLite），用于恢复上下文。
 
         Returns:
             包含 answer 和 sources 的字典。
@@ -277,21 +256,15 @@ class RAGAgent:
 
         try:
             logger.info(
-                "Agent 对话: session=%s, question='%s...' (history=%d条)",
+                "Agent 对话: session=%s, question='%s...'",
                 session_id,
                 question[:50],
-                len(history_messages) if history_messages else 0,
             )
 
-            # 构建完整消息列表（历史 + 当前）
-            input_messages = self._build_message_list(question, history_messages)
-            # 每个请求用唯一 thread_id，避免 InMemorySaver 混淆状态
-            request_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
-
-            # 执行 Agent
-            result = agent.invoke(
-                {"messages": input_messages},
-                {"configurable": {"thread_id": request_id}},
+            # 执行 Agent - AsyncSqliteSaver 自动恢复 thread_id 对应的历史状态
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=question)]},
+                {"configurable": {"thread_id": session_id}},
             )
 
             # 提取回答
@@ -324,15 +297,15 @@ class RAGAgent:
         question: str,
         session_id: str,
         top_k: Optional[int] = None,
-        history_messages: Optional[list[dict]] = None,
     ):
         """流式对话，通过异步生成器逐 token 产出 SSE 事件。
 
+        SqliteSaver 自动按 thread_id 持久化/恢复状态。
+
         Args:
             question: 用户输入。
-            session_id: 会话标识。
+            session_id: 会话标识（作为 thread_id）。
             top_k: 检索文档块数量（可选）。
-            history_messages: 历史消息列表（来自 SQLite），用于恢复上下文。
 
         Yields:
             dict: 包含 type 和对应数据的字典。
@@ -352,24 +325,18 @@ class RAGAgent:
 
 
         logger.info(
-            "Agent 流式对话: session=%s, question='%s...' (history=%d条)",
+            "Agent 流式对话: session=%s, question='%s...'",
             session_id,
             question[:50],
-            len(history_messages) if history_messages else 0,
         )
 
         try:
-            # 构建完整消息列表（历史 + 当前）
-            input_messages = self._build_message_list(question, history_messages)
-            # 每个请求用唯一 thread_id，避免 InMemorySaver 混淆状态
-            request_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
-
             tool_contents: dict[str, str] = {}
             full_answer = ""
 
             async for msg_chunk, metadata in agent.astream(
-                {"messages": input_messages},
-                {"configurable": {"thread_id": request_id}},
+                {"messages": [HumanMessage(content=question)]},
+                {"configurable": {"thread_id": session_id}},
                 stream_mode="messages",
             ):
                 # 记录日志方便调试
@@ -411,9 +378,3 @@ class RAGAgent:
         except Exception as e:
             logger.error("Agent 流式执行失败: %s", e, exc_info=True)
             yield {"type": "error", "content": str(e)}
-
-    def clear_memory(self, session_id: str) -> None:
-        """清除指定会话的记忆。"""
-        if session_id in self._chat_histories:
-            del self._chat_histories[session_id]
-            logger.info("已清除会话记忆: %s", session_id)

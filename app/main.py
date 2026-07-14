@@ -18,13 +18,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import aiosqlite
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.agent import RAGAgent
 from app.chat_history import (
+    _DB_PATH,
     add_message,
     create_session,
     delete_session,
@@ -35,7 +38,7 @@ from app.chat_history import (
 )
 from app.config import settings
 from app.loader import process_file
-from app.logger import logger
+from app.logger import LLMCallbackHandler, logger
 from app.retriever import RAGRetriever
 from app.schemas import (
     ChatRequest,
@@ -61,6 +64,8 @@ _llm: Optional[ChatOpenAI] = None
 _rag_retriever: Optional[RAGRetriever] = None
 _rag_agent: Optional[RAGAgent] = None
 _llm_configured: bool = False
+_db_conn: Optional[aiosqlite.Connection] = None  # AsyncSqliteSaver 的连接，需在关闭时清理
+_checkpointer: Optional[AsyncSqliteSaver] = None
 
 
 def _init_llm() -> Optional[ChatOpenAI]:
@@ -76,13 +81,14 @@ def _init_llm() -> Optional[ChatOpenAI]:
         base_url=settings.DEEPSEEK_BASE_URL,
         temperature=0.3,
         max_tokens=4096,
+        callbacks=[LLMCallbackHandler()],  # 记录每次 LLM 调用的输入输出
     )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理。"""
-    global _llm, _rag_retriever, _rag_agent, _llm_configured
+    global _llm, _rag_retriever, _rag_agent, _llm_configured, _db_conn, _checkpointer
 
     logger.info("=" * 50)
     logger.info("RAG Agent 服务启动中...")
@@ -109,8 +115,14 @@ async def lifespan(app: FastAPI):
 
     if _llm_configured:
         try:
+            # 创建异步 SQLite 连接与 AsyncSqliteSaver（断点续跑用）
+            _db_conn = await aiosqlite.connect(
+                str(_DB_PATH), check_same_thread=False
+            )
+            _checkpointer = AsyncSqliteSaver(_db_conn)
+
             _rag_retriever = RAGRetriever(_llm)
-            _rag_agent = RAGAgent(_llm)
+            _rag_agent = RAGAgent(_llm, _checkpointer)
             logger.info("LLM 及 RAG 组件初始化完成")
         except Exception as e:
             logger.error("RAG 组件初始化失败: %s", e)
@@ -121,6 +133,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 关闭时清理
+    if _db_conn:
+        await _db_conn.close()
     logger.info("RAG Agent 服务关闭中...")
 
 # ==================== 应用初始化 ====================
@@ -313,18 +328,14 @@ async def chat_with_agent(request: ChatRequest):
         # 确保会话存在
         create_session(request.session_id)
 
-        # 加载历史消息（当前消息还没保存，这是之前的所有对话）
-        history = get_messages(request.session_id)
-
         # 保存用户消息
         add_message(request.session_id, "user", request.question)
 
-        # 将历史消息传给 Agent，让它拥有完整的对话上下文
-        result = _rag_agent.chat(
+        # SqliteSaver 自动恢复 thread_id（即 session_id）的历史状态
+        result = await _rag_agent.chat(
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
-            history_messages=history,
         )
 
         # 保存 AI 回复
@@ -359,9 +370,6 @@ async def chat_stream(request: ChatRequest):
     # 确保会话存在
     create_session(request.session_id)
 
-    # 加载历史消息（当前消息还没保存，这是之前的所有对话）
-    history = get_messages(request.session_id)
-
     # 保存用户消息
     add_message(request.session_id, "user", request.question)
 
@@ -372,7 +380,6 @@ async def chat_stream(request: ChatRequest):
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
-            history_messages=history,
         ):
             # 累计完整回复
             if event.get("type") == "token":
