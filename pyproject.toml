@@ -28,7 +28,6 @@ dependencies = [
     "modelscope>=1.0.0",
     "pypdf>=6.14.2",
     "docling>=2.110.0",
-    "unstructured[local-inference]>=0.24.0",
     "pymupdf>=1.28.0",
     "pypdf2>=3.0.1",
     "rapidocr-onnxruntime>=1.3.0",

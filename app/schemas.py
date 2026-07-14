@@ -28,6 +28,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, description="用户问题")
     session_id: str = Field(..., min_length=1, description="会话标识，用于区分不同对话")
     top_k: Optional[int] = Field(None, ge=1, le=50, description="检索返回的文档块数量")
+    model: Optional[str] = Field(None, description="LLM 模型名称，为空则使用默认模型")
 
 
 class UploadRequest(BaseModel):
@@ -42,9 +43,6 @@ class UploadRequest(BaseModel):
     )
     enable_cleaning: Optional[bool] = Field(
         None, description="是否启用文本清洗"
-    )
-    enable_smart_chunk: Optional[bool] = Field(
-        None, description="是否启用智能切分"
     )
 
 
@@ -150,3 +148,37 @@ class MessageListResponse(BaseModel):
     """消息列表响应。"""
 
     messages: list[MessageInfo] = Field(..., description="消息列表")
+
+
+# ==================== 文档管理模型 ====================
+
+
+class DocumentInfo(BaseModel):
+    """文档信息。"""
+
+    doc_name: str = Field(..., description="文档名称")
+    doc_id: str = Field(..., description="文档唯一标识")
+    chunk_count: int = Field(..., description="文档块数量")
+    upload_time: str = Field(default="", description="上传时间")
+
+
+class DocumentListResponse(BaseModel):
+    """文档列表响应。"""
+
+    documents: list[DocumentInfo] = Field(..., description="文档列表")
+
+
+class ChunkPreview(BaseModel):
+    """文档块预览。"""
+
+    chunk_index: int = Field(..., description="块序号")
+    content: str = Field(..., description="块内容")
+    chunk_id: str = Field(default="", description="块唯一标识")
+
+
+class DocumentChunksResponse(BaseModel):
+    """文档块列表响应。"""
+
+    doc_name: str = Field(..., description="文档名称")
+    doc_id: str = Field(..., description="文档唯一标识")
+    chunks: list[ChunkPreview] = Field(..., description="文档块列表")

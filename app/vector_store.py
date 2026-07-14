@@ -512,6 +512,69 @@ class VectorStoreManager:
         except Exception:
             return 0
 
+    def list_documents(self) -> list[dict]:
+        """列出知识库中的所有文档（按 doc_name 去重统计）。
+
+        Returns:
+            list[dict]: 每个文档包含 doc_name, doc_id, chunk_count, upload_time。
+        """
+        try:
+            collection = self.collection
+            collection.load()
+            results = collection.query(
+                expr="pk >= 0",
+                output_fields=["doc_id", "doc_name", "upload_time", "pk"],
+            )
+            docs: dict[str, dict] = {}
+            for r in results:
+                name = r.get("doc_name", "unknown")
+                if name not in docs:
+                    docs[name] = {
+                        "doc_name": name,
+                        "doc_id": r.get("doc_id", ""),
+                        "chunk_count": 0,
+                        "upload_time": r.get("upload_time", ""),
+                    }
+                docs[name]["chunk_count"] += 1
+            return sorted(docs.values(), key=lambda x: x["doc_name"])
+        except Exception as e:
+            logger.error("列出文档失败: %s", e)
+            return []
+
+    def get_document_chunks(self, doc_name: str) -> list[Document]:
+        """获取指定文档的所有文档块（按 chunk_index 排序）。
+
+        Args:
+            doc_name: 文档名称。
+
+        Returns:
+            排序后的文档块列表。
+        """
+        try:
+            collection = self.collection
+            collection.load()
+            results = collection.query(
+                expr=f'doc_name == "{doc_name}"',
+                output_fields=["text", "doc_id", "doc_name", "chunk_index", "chunk_id", "upload_time"],
+            )
+            docs = []
+            for r in results:
+                doc = Document(
+                    page_content=r.get("text", ""),
+                    metadata={
+                        "doc_id": r.get("doc_id", ""),
+                        "doc_name": r.get("doc_name", ""),
+                        "chunk_index": r.get("chunk_index", 0),
+                        "chunk_id": r.get("chunk_id", ""),
+                        "upload_time": r.get("upload_time", ""),
+                    },
+                )
+                docs.append(doc)
+            return sorted(docs, key=lambda x: x.metadata.get("chunk_index", 0))
+        except Exception as e:
+            logger.warning("获取文档块失败: %s", e)
+            return []
+
 
 # 全局单例
 vector_store_manager = VectorStoreManager()

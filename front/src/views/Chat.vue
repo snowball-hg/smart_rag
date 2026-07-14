@@ -42,6 +42,16 @@
             当前会话: {{ currentSessionTitle || '新对话' }}
           </span>
           <div class="session-actions-bar">
+            <label class="model-selector" title="选择 LLM 模型">
+              <select v-model="selectedModel" class="model-select">
+                <option value="">默认 ({{ defaultModel }})</option>
+                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </label>
+            <label class="k-slider" title="检索返回的文档块数量">
+              <span class="k-label">Top-{{ topK }}</span>
+              <input type="range" v-model.number="topK" min="1" max="20" class="k-range" />
+            </label>
             <label class="stream-toggle" title="流式模式下 AI 逐 token 输出，非流式模式下等待完整结果">
               <input type="checkbox" v-model="streamMode" />
               <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -70,7 +80,10 @@
                 <details>
                   <summary>参考来源 ({{ msg.sources.length }})</summary>
                   <div class="source-item" v-for="(src, j) in msg.sources" :key="j">
-                    <span class="source-name">{{ src.doc_name }}</span> 块 #{{ src.chunk_index }}
+                    <router-link :to="'/documents'" class="source-link" title="查看文档内容">
+                      {{ src.doc_name }}
+                    </router-link>
+                    <span class="source-chunk">块 #{{ src.chunk_index }}</span>
                   </div>
                 </details>
               </div>
@@ -140,6 +153,7 @@ import {
   getSessionMessages,
   renameSession,
   deleteSession,
+  getModels,
 } from '../api/index.js'
 
 function renderMarkdown(text) {
@@ -157,6 +171,12 @@ const messages = ref([])
 const messageList = ref(null)
 const streamMode = ref(false)
 const sidebarCollapsed = ref(false)
+
+// 模型选择
+const models = ref([])
+const defaultModel = ref('')
+const selectedModel = ref('')
+const topK = ref(5)
 
 // 重命名
 const renamingSession = ref(null)
@@ -178,7 +198,18 @@ watch(renamingSession, (val) => {
 
 onMounted(() => {
   loadSessions()
+  loadModels()
 })
+
+async function loadModels() {
+  try {
+    const res = await getModels()
+    models.value = res.data.models || []
+    defaultModel.value = res.data.default || ''
+  } catch (e) {
+    console.error('加载模型列表失败:', e)
+  }
+}
 
 async function loadSessions() {
   try {
@@ -284,7 +315,7 @@ async function sendMessage() {
     scrollToBottom()
 
     try {
-      const res = await chatStream(q, sessionId)
+      const res = await chatStream(q, sessionId, topK.value, selectedModel.value || undefined)
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ detail: `请求失败 (${res.status})` }))
         throw new Error(errData.detail)
@@ -338,7 +369,7 @@ async function sendMessage() {
   } else {
     // 非流式模式
     try {
-      const res = await chatWithAgent(q, sessionId)
+      const res = await chatWithAgent(q, sessionId, topK.value, selectedModel.value || undefined)
       messages.value.push({
         role: 'assistant',
         content: res.data.answer,
@@ -537,6 +568,46 @@ function scrollToBottom() {
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+}
+
+.model-selector {
+  display: flex;
+  align-items: center;
+}
+
+.model-select {
+  padding: 4px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #fff;
+  cursor: pointer;
+  outline: none;
+  max-width: 160px;
+}
+
+.model-select:focus {
+  border-color: #1890ff;
+}
+
+.k-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.k-label {
+  font-size: 12px;
+  color: #666;
+  white-space: nowrap;
+  min-width: 36px;
+}
+
+.k-range {
+  width: 80px;
+  height: 4px;
+  cursor: pointer;
+  accent-color: #1890ff;
 }
 
 .btn {
@@ -831,6 +902,22 @@ function scrollToBottom() {
 .source-name {
   color: #1890ff;
   font-weight: 500;
+}
+
+.source-link {
+  color: #1890ff;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.source-link:hover {
+  text-decoration: underline;
+}
+
+.source-chunk {
+  color: #999;
+  font-size: 12px;
+  margin-left: 4px;
 }
 
 .input-area {

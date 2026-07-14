@@ -189,7 +189,7 @@ def normalize_terms(text: str, custom_dict: Optional[dict[str, str]] = None) -> 
 
 def clean_document_chunks(
     chunks: list[Document],
-    merge_broken_lines: bool = True,
+    merge_broken_lines: bool = False,
     is_ocr: bool = False,
 ) -> list[Document]:
     """对文档块列表执行完整清洗流程。

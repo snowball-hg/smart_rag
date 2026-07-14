@@ -25,14 +25,18 @@ export function queryDocuments(question, top_k = null) {
 }
 
 /** 对话交互（非流式） */
-export function chatWithAgent(question, session_id, top_k = null) {
-  return api.post('/chat', { question, session_id, top_k })
+export function chatWithAgent(question, session_id, top_k = null, model = null) {
+  const body = { question, session_id }
+  if (top_k !== null) body.top_k = top_k
+  if (model) body.model = model
+  return api.post('/chat', body)
 }
 
 /** 流式对话（SSE） */
-export function chatStream(question, session_id, top_k = null) {
+export function chatStream(question, session_id, top_k = null, model = null) {
   const body = { question, session_id }
   if (top_k !== null) body.top_k = top_k
+  if (model) body.model = model
   return fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -70,4 +74,23 @@ export function renameSession(session_id, title) {
 /** 删除会话 */
 export function deleteSession(session_id) {
   return api.delete(`/sessions/${session_id}`)
+}
+
+// ==================== 文档管理 API ====================
+
+/** 获取文档列表 */
+export function getDocuments() {
+  return api.get('/documents')
+}
+
+/** 获取文档块预览 */
+export function getDocumentChunks(doc_name) {
+  return api.get(`/documents/${encodeURIComponent(doc_name)}/chunks`)
+}
+
+// ==================== 模型管理 API ====================
+
+/** 获取可用模型列表 */
+export function getModels() {
+  return api.get('/models')
 }

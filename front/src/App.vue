@@ -29,6 +29,12 @@
             <span class="nav-label">智能对话</span>
           </router-link>
         </li>
+        <li>
+          <router-link to="/documents" class="nav-item" active-class="active">
+            <span class="nav-icon">📚</span>
+            <span class="nav-label">知识库管理</span>
+          </router-link>
+        </li>
       </ul>
     </nav>
     <main class="main-content">

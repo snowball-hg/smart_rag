@@ -25,6 +25,12 @@ class Settings:
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     DEEPSEEK_MODEL_NAME: str = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-v4-flash")
 
+    # 前端可选的模型列表
+    AVAILABLE_MODELS: list[str] = [
+        "deepseek-chat",
+        "deepseek-reasoner",
+    ]
+
     # ---- Milvus ----
     MILVUS_HOST: str = os.getenv("MILVUS_HOST", "localhost")
     MILVUS_PORT: str = os.getenv("MILVUS_PORT", "19530")
@@ -42,14 +48,9 @@ class Settings:
     QWEN_EMBEDDING_API_KEY: str = os.getenv("QWEN_EMBEDDING_API_KEY", "")
     QWEN_EMBEDDING_MODEL: str = os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v3")
 
-    # ---- Document Processing ----
-    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
-    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "100"))
-
-    # ---- 处理器管线开关 ----
+    # ---- Processor ----
     PROCESSOR_ENABLE_OCR: bool = os.getenv("PROCESSOR_ENABLE_OCR", "true").lower() == "true"
     PROCESSOR_ENABLE_CLEANING: bool = os.getenv("PROCESSOR_ENABLE_CLEANING", "true").lower() == "true"
-    PROCESSOR_ENABLE_SMART_CHUNK: bool = os.getenv("PROCESSOR_ENABLE_SMART_CHUNK", "true").lower() == "true"
 
     # ---- Retrieval ----
     TOP_K: int = int(os.getenv("TOP_K", "5"))

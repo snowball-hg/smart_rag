@@ -43,7 +43,11 @@ from app.retriever import RAGRetriever
 from app.schemas import (
     ChatRequest,
     ChatResponse,
+    ChunkPreview,
     DeleteResponse,
+    DocumentChunksResponse,
+    DocumentInfo,
+    DocumentListResponse,
     HealthResponse,
     MessageInfo,
     MessageListResponse,
@@ -68,20 +72,29 @@ _db_conn: Optional[aiosqlite.Connection] = None  # AsyncSqliteSaver 的连接，
 _checkpointer: Optional[AsyncSqliteSaver] = None
 
 
-def _init_llm() -> Optional[ChatOpenAI]:
-    """初始化 DeepSeek LLM 实例。"""
+def _init_llm(model_name: Optional[str] = None) -> Optional[ChatOpenAI]:
+    """初始化 DeepSeek LLM 实例。
+
+    Args:
+        model_name: 模型名称，为空则使用配置文件中的默认模型。
+
+    Returns:
+        ChatOpenAI 实例或 None（未配置时）。
+    """
     api_key = settings.DEEPSEEK_API_KEY
     if not api_key or api_key == "sk-your-deepseek-api-key-here":
         logger.warning("DEEPSEEK_API_KEY 未配置，LLM 功能不可用")
         return None
 
+    model = model_name or settings.DEEPSEEK_MODEL_NAME
+    logger.info("初始化 LLM: model=%s", model)
     return ChatOpenAI(
-        model=settings.DEEPSEEK_MODEL_NAME,
+        model=model,
         api_key=api_key,
         base_url=settings.DEEPSEEK_BASE_URL,
         temperature=0.3,
         max_tokens=4096,
-        callbacks=[LLMCallbackHandler()],  # 记录每次 LLM 调用的输入输出
+        callbacks=[LLMCallbackHandler()],
     )
 
 
@@ -96,12 +109,11 @@ async def lifespan(app: FastAPI):
     logger.info("Milvus 地址: %s:%s", settings.MILVUS_HOST, settings.MILVUS_PORT)
     logger.info("Embedding 提供商: %s", settings.EMBEDDING_PROVIDER)
     logger.info(
-        "处理器配置: OCR=%s, 清洗=%s, 智能切分=%s",
+        "处理器配置: OCR=%s, 清洗=%s",
         settings.PROCESSOR_ENABLE_OCR,
         settings.PROCESSOR_ENABLE_CLEANING,
-        settings.PROCESSOR_ENABLE_SMART_CHUNK,
     )
-    logger.info("分块配置: size=%d, overlap=%d", settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+    logger.info("分块配置: HybridChunker (Docling 内置，chunk_size=512, overlap=128)")
     logger.info(
         "检索配置: 模式=%s, BM25=%s, 重排序=%s",
         settings.RETRIEVAL_MODE,
@@ -182,6 +194,15 @@ async def health_check():
     )
 
 
+@app.get("/models")
+async def get_available_models():
+    """获取可用的 LLM 模型列表。"""
+    return {
+        "models": settings.AVAILABLE_MODELS,
+        "default": settings.DEEPSEEK_MODEL_NAME,
+    }
+
+
 VALID_CATEGORIES = {"regulation", "safety", "manual", "report", "general"}
 
 
@@ -191,7 +212,6 @@ async def upload_file(
     category: Optional[str] = Form(None),
     enable_ocr: Optional[bool] = Form(None),
     enable_cleaning: Optional[bool] = Form(None),
-    enable_smart_chunk: Optional[bool] = Form(None),
 ):
     """上传文件并索引到知识库。
 
@@ -200,7 +220,6 @@ async def upload_file(
     - category: 文档分类（regulation/safety/manual/report/general）
     - enable_ocr: 是否启用 OCR 识别扫描件
     - enable_cleaning: 是否启用文本清洗
-    - enable_smart_chunk: 是否启用智能切分
 
     不传参数时使用配置文件中的默认值。
     """
@@ -214,8 +233,7 @@ async def upload_file(
                 status_code=400,
                 detail=(
                     f"不支持的文件类型: {ext}。"
-                    f"基础支持: {', '.join(allowed_basic)}；"
-                    f"安装 Unstructured 后可支持: Word/PPT/Excel/HTML/CSV/Email 等"
+                    f"支持的类型: {', '.join(allowed_basic)}"
                 ),
             )
 
@@ -248,7 +266,6 @@ async def upload_file(
             category=category,
             enable_ocr=enable_ocr,
             enable_cleaning=enable_cleaning,
-            enable_smart_chunk=enable_smart_chunk,
         )
         if not chunks:
             raise HTTPException(
@@ -271,10 +288,8 @@ async def upload_file(
     doc_id = chunks[0].metadata["doc_id"]
 
     # ---- 记录使用的处理器 ----
-    processors_used = []
-    if "heading_path" in chunks[0].metadata:
-        processors_used.append("smart_chunk")
-    if any(doc.metadata.get("element_type") == "ocr_text" for doc in chunks):
+    processors_used = ["hybrid_chunk"]
+    if enable_ocr:
         processors_used.append("ocr")
     if category and "category" in chunks[0].metadata:
         processors_used.append(f"category_{category}")
@@ -331,8 +346,18 @@ async def chat_with_agent(request: ChatRequest):
         # 保存用户消息
         add_message(request.session_id, "user", request.question)
 
-        # SqliteSaver 自动恢复 thread_id（即 session_id）的历史状态
-        result = await _rag_agent.chat(
+        # 如果指定了模型，重新初始化 LLM（临时覆盖）
+        if request.model and request.model != settings.DEEPSEEK_MODEL_NAME:
+            llm = _init_llm(request.model)
+            if llm:
+                from app.agent import RAGAgent
+                agent = RAGAgent(llm, _checkpointer)
+            else:
+                agent = _rag_agent
+        else:
+            agent = _rag_agent
+
+        result = await agent.chat(
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
@@ -376,7 +401,18 @@ async def chat_stream(request: ChatRequest):
     async def event_generator():
         full_answer = ""
 
-        async for event in _rag_agent.chat_stream(
+        # 如果指定了模型，重新初始化 LLM
+        if request.model and request.model != settings.DEEPSEEK_MODEL_NAME:
+            llm = _init_llm(request.model)
+            if llm:
+                from app.agent import RAGAgent
+                agent = RAGAgent(llm, _checkpointer)
+            else:
+                agent = _rag_agent
+        else:
+            agent = _rag_agent
+
+        async for event in agent.chat_stream(
             question=request.question,
             session_id=request.session_id,
             top_k=request.top_k,
@@ -404,6 +440,46 @@ async def chat_stream(request: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/documents", response_model=DocumentListResponse)
+async def list_documents():
+    """获取知识库中的所有文档列表。"""
+    try:
+        docs = vector_store_manager.list_documents()
+        return DocumentListResponse(
+            documents=[DocumentInfo(**d) for d in docs]
+        )
+    except Exception as e:
+        logger.error("获取文档列表失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"获取文档列表失败: {str(e)}")
+
+
+@app.get("/documents/{doc_name}/chunks", response_model=DocumentChunksResponse)
+async def get_document_chunks(doc_name: str):
+    """获取指定文档的所有文档块（用于预览）。"""
+    try:
+        chunks = vector_store_manager.get_document_chunks(doc_name)
+        if not chunks:
+            raise HTTPException(status_code=404, detail="文档不存在或已删除")
+        doc_id = chunks[0].metadata.get("doc_id", "")
+        return DocumentChunksResponse(
+            doc_name=doc_name,
+            doc_id=doc_id,
+            chunks=[
+                ChunkPreview(
+                    chunk_index=c.metadata.get("chunk_index", 0),
+                    content=c.page_content,
+                    chunk_id=c.metadata.get("chunk_id", ""),
+                )
+                for c in chunks
+            ],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("获取文档块失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"获取文档块失败: {str(e)}")
 
 
 @app.delete("/documents/{doc_id}", response_model=DeleteResponse)
