@@ -304,8 +304,8 @@ class VectorStoreManager:
         try:
             collection = self.collection
             expr = f'doc_id == "{doc_id}"'
-            result = collection.delete(expr)
-            deleted = len(result) if result else 0
+            result = self.collection.delete(expr)
+            deleted = result.delete_count if result else 0
             logger.info("Milvus 删除文档 %s: %s 个块", doc_id, deleted)
             return deleted
         except Exception as e:

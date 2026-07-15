@@ -28,7 +28,8 @@ AGENT_SYSTEM_PROMPT = (
     "你有以下能力：\n"
     "1. 检索知识库中的文档内容来回答问题\n"
     "2. 基于检索结果进行推理和总结\n"
-    "3. 记住对话历史，进行多轮交流\n\n"
+    "3. 记住对话历史，进行多轮交流\n"
+    "4. 调用工具完成其他任务\n\n"
     "使用规则：\n"
     "- 当用户提问时，如果问题需要查阅文档，请调用检索工具。\n"
     "- 如果问题需要查阅文档，调用一次检索工具即可，不要多次检索。\n"
@@ -182,12 +183,13 @@ class RAGAgent:
         Returns:
             CompiledStateGraph 实例。
         """
-        return create_agent(
+        result = create_agent(
             model=self._llm,
             tools=tools,
             system_prompt=AGENT_SYSTEM_PROMPT,
             checkpointer=self._checkpointer,
         )
+        return result
 
 
     def _parse_sources_from_tool_calls(
@@ -249,7 +251,9 @@ class RAGAgent:
         # 从缓存获取或构建指定 top_k 的 Agent
         if top_k is not None:
             if top_k not in self._agent_cache:
-                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(self._llm, top_k)])
+                self._agent_cache[top_k] = self._build_agent(
+                    [_create_retrieval_tool(self._llm, top_k), get_current_time]
+                )
             agent = self._agent_cache[top_k]
         else:
             agent = self._agent
@@ -318,7 +322,9 @@ class RAGAgent:
         # 从缓存获取或构建指定 top_k 的 Agent
         if top_k is not None:
             if top_k not in self._agent_cache:
-                self._agent_cache[top_k] = self._build_agent([_create_retrieval_tool(self._llm, top_k)])
+                self._agent_cache[top_k] = self._build_agent(
+                    [_create_retrieval_tool(self._llm, top_k), get_current_time]
+                )
             agent = self._agent_cache[top_k]
         else:
             agent = self._agent

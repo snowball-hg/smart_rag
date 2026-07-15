@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
         settings.PROCESSOR_ENABLE_OCR,
         settings.PROCESSOR_ENABLE_CLEANING,
     )
-    logger.info("分块配置: HybridChunker (Docling 内置，chunk_size=512, overlap=128)")
+    logger.info("分块配置: HybridChunker (Docling 内置，chunk_size=%s, overlap=%s)", settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
     logger.info(
         "检索配置: 模式=%s, BM25=%s, 重排序=%s",
         settings.RETRIEVAL_MODE,
@@ -566,6 +566,17 @@ async def delete_session_endpoint(session_id: str):
         success = delete_session(session_id)
         if not success:
             raise HTTPException(status_code=404, detail="会话不存在")
+
+        # 同时清理 AsyncSqliteSaver 的 checkpoint 数据
+        if _db_conn is not None:
+            await _db_conn.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ?", (session_id,)
+            )
+            await _db_conn.execute(
+                "DELETE FROM writes WHERE thread_id = ?", (session_id,)
+            )
+            await _db_conn.commit()
+
         return {"message": "会话已删除", "session_id": session_id}
     except HTTPException:
         raise

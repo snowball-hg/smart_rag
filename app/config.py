@@ -27,8 +27,7 @@ class Settings:
 
     # 前端可选的模型列表
     AVAILABLE_MODELS: list[str] = [
-        "deepseek-chat",
-        "deepseek-reasoner",
+        "qwen3.7-plus",
     ]
 
     # ---- Milvus ----
@@ -48,6 +47,9 @@ class Settings:
     QWEN_EMBEDDING_API_KEY: str = os.getenv("QWEN_EMBEDDING_API_KEY", "")
     QWEN_EMBEDDING_MODEL: str = os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v3")
 
+    # ---- Chunking ----
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1024"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "256"))
     # ---- Processor ----
     PROCESSOR_ENABLE_OCR: bool = os.getenv("PROCESSOR_ENABLE_OCR", "true").lower() == "true"
     PROCESSOR_ENABLE_CLEANING: bool = os.getenv("PROCESSOR_ENABLE_CLEANING", "true").lower() == "true"

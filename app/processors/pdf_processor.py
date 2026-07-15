@@ -12,6 +12,7 @@ from typing import Optional
 
 from langchain_core.documents import Document
 
+from app.config import settings
 from app.logger import logger
 
 # 模块级 Docling converter 单例（避免每次调用重新加载模型权重）
@@ -90,8 +91,8 @@ def process_with_docling(
         from docling.chunking import HybridChunker
 
         chunker = HybridChunker(
-            chunk_size=512,
-            chunk_overlap=128,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
             merge_peers=True,
             use_hierarchy=True,
         )
