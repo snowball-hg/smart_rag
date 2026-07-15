@@ -15,13 +15,6 @@ from pydantic import BaseModel, Field
 # ==================== 请求模型 ====================
 
 
-class QueryRequest(BaseModel):
-    """纯问答请求（无会话记忆）。"""
-
-    question: str = Field(..., min_length=1, description="用户问题")
-    top_k: Optional[int] = Field(None, ge=1, le=50, description="检索返回的文档块数量")
-
-
 class ChatRequest(BaseModel):
     """对话请求（带会话记忆）。"""
 
@@ -57,15 +50,6 @@ class SourceDocument(BaseModel):
     content: str = Field(..., description="块内容摘要")
     category: Optional[str] = Field(None, description="文档分类")
     heading_path: Optional[str] = Field(None, description="标题路径")
-
-
-class QueryResponse(BaseModel):
-    """问答响应。"""
-
-    answer: str = Field(..., description="LLM 生成的回答")
-    sources: list[SourceDocument] = Field(
-        default_factory=list, description="引用来源列表"
-    )
 
 
 class ChatResponse(BaseModel):

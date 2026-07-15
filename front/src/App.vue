@@ -18,12 +18,6 @@
           </router-link>
         </li>
         <li>
-          <router-link to="/query" class="nav-item" active-class="active">
-            <span class="nav-icon">🔍</span>
-            <span class="nav-label">知识问答</span>
-          </router-link>
-        </li>
-        <li>
           <router-link to="/chat" class="nav-item" active-class="active">
             <span class="nav-icon">💬</span>
             <span class="nav-label">智能对话</span>

@@ -36,11 +36,6 @@
           <div class="action-title">上传文档</div>
           <div class="action-desc">上传 PDF、TXT、Markdown 文件到知识库</div>
         </router-link>
-        <router-link to="/query" class="action-card">
-          <div class="action-icon">🔍</div>
-          <div class="action-title">知识问答</div>
-          <div class="action-desc">基于知识库内容进行单次问答</div>
-        </router-link>
         <router-link to="/chat" class="action-card">
           <div class="action-icon">💬</div>
           <div class="action-title">智能对话</div>
@@ -129,7 +124,7 @@ onMounted(async () => {
 
 .action-cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
 }
 

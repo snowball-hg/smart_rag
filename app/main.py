@@ -2,7 +2,6 @@
 
 定义所有 RESTful API 端点，包括：
 - 文件上传与索引（支持文档分类和预处理开关）
-- 纯问答（RAG，无会话）
 - 对话式交互（Agent，带记忆）
 - 文档删除管理
 - 健康检查
@@ -39,7 +38,6 @@ from app.chat_history import (
 from app.config import settings
 from app.loader import process_file
 from app.logger import LLMCallbackHandler, logger
-from app.retriever import RAGRetriever
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -51,8 +49,6 @@ from app.schemas import (
     HealthResponse,
     MessageInfo,
     MessageListResponse,
-    QueryRequest,
-    QueryResponse,
     RenameSessionRequest,
     SessionInfo,
     SessionListResponse,
@@ -65,7 +61,6 @@ from app.vector_store import vector_store_manager
 # ==================== 全局状态 ====================
 
 _llm: Optional[ChatOpenAI] = None
-_rag_retriever: Optional[RAGRetriever] = None
 _rag_agent: Optional[RAGAgent] = None
 _llm_configured: bool = False
 _db_conn: Optional[aiosqlite.Connection] = None  # AsyncSqliteSaver 的连接，需在关闭时清理
@@ -101,7 +96,7 @@ def _init_llm(model_name: Optional[str] = None) -> Optional[ChatOpenAI]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理。"""
-    global _llm, _rag_retriever, _rag_agent, _llm_configured, _db_conn, _checkpointer
+    global _llm, _rag_agent, _llm_configured, _db_conn, _checkpointer
 
     logger.info("=" * 50)
     logger.info("RAG Agent 服务启动中...")
@@ -133,7 +128,6 @@ async def lifespan(app: FastAPI):
             )
             _checkpointer = AsyncSqliteSaver(_db_conn)
 
-            _rag_retriever = RAGRetriever(_llm)
             _rag_agent = RAGAgent(_llm, _checkpointer)
             logger.info("LLM 及 RAG 组件初始化完成")
         except Exception as e:
@@ -304,30 +298,6 @@ async def upload_file(
         ),
         processors_used=processors_used,
     )
-
-
-@app.post("/query", response_model=QueryResponse)
-async def query_documents(request: QueryRequest):
-    """纯问答模式（RAG，不保留会话记忆）。"""
-    if not _llm_configured or _rag_retriever is None:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM 未配置，请先设置 DEEPSEEK_API_KEY",
-        )
-
-    try:
-        result = _rag_retriever.query(
-            question=request.question, top_k=request.top_k
-        )
-        return QueryResponse(
-            answer=result["answer"],
-            sources=[
-                SourceDocument(**s) for s in result["sources"]
-            ],
-        )
-    except Exception as e:
-        logger.error("查询失败: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"查询处理失败: {str(e)}")
 
 
 @app.post("/chat", response_model=ChatResponse)

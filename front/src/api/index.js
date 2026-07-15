@@ -19,11 +19,6 @@ export function uploadFile(file) {
   return api.post('/upload', form)
 }
 
-/** 纯问答 */
-export function queryDocuments(question, top_k = null) {
-  return api.post('/query', { question, top_k })
-}
-
 /** 对话交互（非流式） */
 export function chatWithAgent(question, session_id, top_k = null, model = null) {
   const body = { question, session_id }
